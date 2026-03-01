@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8100/api/v1";
+const API_BASE = import.meta.env.VITE_API_BASE || "/api/v1";
 
 /* ═══════════════════════════ DESIGN TOKENS ═══════════════════════════ */
 const THEME_DARK = {
@@ -384,19 +384,39 @@ async function callClaude(text,lang) {
   const r=await fetch(`${API_BASE}/nlp/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,title:""})});
   if(!r.ok) throw new Error(`NLP API error ${r.status}`);
   const d=await r.json();
+
+  const score      = d.sentiment_score||0;
+  const absScore   = Math.abs(score);
+  const sentiment  = d.sentiment||"neutre";
+  const langDet    = d.lang||lang;
+  const confiance  = d.confidence_score!=null ? Math.round(d.confidence_score*100)
+                   : d.nlp_source==="claude"  ? 92 : 72;
+  const disinfoRaw = d.disinformation_score??d.disinfo_score??null;
+  const disinfoScore = disinfoRaw!=null ? Math.round(disinfoRaw)
+                     : d.is_disinformation    ? Math.round(65+absScore*20)
+                     : Math.round(absScore*18);
+
+  let recommandation;
+  if(disinfoScore>60)        recommandation="⚠ Risque élevé de désinformation. Déclencher une procédure de vérification et préparer un démenti officiel si nécessaire.";
+  else if(sentiment==="negatif"&&absScore>0.5) recommandation="Sentiment fortement négatif. Surveiller la propagation et envisager une réponse communication ciblée.";
+  else if(sentiment==="negatif")               recommandation="Surveiller l'évolution. Renforcer la communication positive sur les thèmes concernés.";
+  else if(sentiment==="positif"&&absScore>0.4) recommandation="Contenu favorable à forte intensité. Amplifier via les canaux officiels pour maximiser la portée.";
+  else if(sentiment==="positif")               recommandation="Contenu favorable. Maintenir la veille standard.";
+  else                                         recommandation="Sentiment neutre. Aucune action immédiate requise. Maintenir la veille standard.";
+
   return {
-    langue_detectee:d.lang||lang,
-    sentiment:d.sentiment||"neutre",
-    score_sentiment:d.sentiment_score||0,
-    confiance:d.nlp_source==="claude"?92:72,
-    intensite:Math.abs(d.sentiment_score||0)>0.5?"forte":Math.abs(d.sentiment_score||0)>0.2?"modérée":"faible",
-    emotions:[],
-    themes:d.topics||[],
-    entites:(d.entities||[]).map(e=>typeof e==="string"?{nom:e,type:"ENTITÉ",sentiment:"neutre"}:e),
-    desinformation_score:d.is_disinformation?80:15,
-    signaux_faibles:[],
-    resume_analytique:d.summary||"Analyse effectuée par le moteur NLP PNVD.",
-    recommandation_action:d.sentiment==="negatif"?"Surveiller l'évolution et préparer une réponse communication.":"Maintenir la veille standard.",
+    langue_detectee : langDet,
+    sentiment,
+    score_sentiment : score,
+    confiance,
+    intensite       : absScore>0.5?"forte":absScore>0.2?"modérée":"faible",
+    emotions        : d.emotions||[],
+    themes          : d.topics||[],
+    entites         : (d.entities||[]).map(e=>typeof e==="string"?{nom:e,type:"ENTITÉ",sentiment:"neutre"}:e),
+    desinformation_score : disinfoScore,
+    signaux_faibles : d.weak_signals||d.signaux_faibles||[],
+    resume_analytique    : d.summary||`Analyse ${langDet} effectuée. Sentiment ${sentiment} détecté avec une intensité ${absScore>0.5?"forte":absScore>0.2?"modérée":"faible"}.`,
+    recommandation_action: recommandation,
   };
 }
 
@@ -598,8 +618,8 @@ export default function PNVD() {
 
   /* LIVE DATA */
   const [mentions,setMentions] = useState([]);
-  const [mCnt,setMCnt]         = useState(24873);
-  const [totalIng,setTI]       = useState(847293);
+  const [mCnt,setMCnt]         = useState(0);
+  const [totalIng,setTI]       = useState(0);
   const [liveCnt,setLC]        = useState(0);
   const [topics,setTopics]     = useState(TOPICS_INIT.map(t=>({...t,vol:t.base,delta:0})));
   const [regions,setRegions]   = useState(REGIONS_BASE.map(r=>({...r,vol:0,pct:0})));
@@ -665,6 +685,8 @@ export default function PNVD() {
   const [ytKey,setYtKey]       = useState("");
   const [ytKeyDraft,setYtKD]   = useState("");
   const [showYtKey,setShowYK]  = useState(false);
+  const [configPlatform,setCfgPlat] = useState(null);
+  const [cfgDraft,setCfgDraft]      = useState({});
   const [kwFilter,setKwF]      = useState("all");
   const [selPlatform,setSelPl] = useState(null); // null = toutes les plateformes
   const [selKW,setSelKW]       = useState(null);
@@ -720,8 +742,10 @@ export default function PNVD() {
           thumbnail:a.thumbnail||null,
           region:a.region||"National",
           sentiment:a.sentiment,
+          sentimentScore:a.sentiment_score||0,
           matchedKW:a.matched_keywords||[],
-          likes:a.likes||0, shares:a.shares||0,
+          isDisinfo:a.is_disinformation||false,
+          likes:a.likes||0, shares:a.shares||0, comments:a.comments||0,
         };
       });
       setLI(items);
@@ -741,10 +765,10 @@ export default function PNVD() {
         srcs.forEach(s=>{ns[s.id]={status:s.status,count:s.last_count||0,lastFetch:s.last_fetch?new Date(s.last_fetch):null,error:s.last_error};});
         setSS(p=>({...p,...ns}));
 
-        // Mettre à jour le compteur ingested pour les sources RSS depuis la DB
+        // Mettre à jour ingested, errors et last_error depuis collect/status
         setConn(prev=>prev.map(c=>{
           const matchRss=srcs.find(s=>s.name&&c.name&&s.name.toLowerCase()===c.name.toLowerCase());
-          if(matchRss) return {...c, ingested:matchRss.last_count||0};
+          if(matchRss) return {...c, ingested:matchRss.last_count||0, errors:matchRss.error_count||0, lastError:matchRss.last_error||null};
           return c;
         }));
       }
@@ -787,7 +811,7 @@ export default function PNVD() {
       ]);
       if(dashRes.ok){
         const d = await dashRes.json();
-        setDashStats(d);
+        setDashStats({...d, disinfoCount: d.disinformation_count||0});
         setMCnt(d.total_mentions||0);
         const total = (d.regions||[]).reduce((s,r)=>s+r.count,0)||1;
         const rMap = {};
@@ -806,7 +830,14 @@ export default function PNVD() {
           delta:t.vol>0?Math.round((t.pos-t.neg)/Math.max(t.vol,1)*100):0,
         })));
       }
-      if(kwRes.ok){ const kd=await kwRes.json(); if(kd.length) setKwStats(kd); }
+      if(kwRes.ok){
+        const kd=await kwRes.json();
+        if(kd.length) setKwStats(kd.map(k=>({
+          ...k,
+          vol:  k.vol??k.count??k.hits??0,
+          delta: k.hits>0 ? Math.round((( k.positif||0)-(k.negatif||0))/Math.max(k.hits,1)*100) : 0,
+        })));
+      }
       if(healthRes.ok){ const h=await healthRes.json(); setTI(h.total_articles||0); }
       if(connRes.ok){
         const ch=await connRes.json();
@@ -920,7 +951,29 @@ export default function PNVD() {
     return m.text.toLowerCase().includes(search.toLowerCase())||m.author.toLowerCase().includes(search.toLowerCase())||m.region.toLowerCase().includes(search.toLowerCase());
   });
   const ftKW   = kws.filter(k=>!search||k.toLowerCase().includes(search.toLowerCase()));
-  const ftInfl = INFLUENCERS.filter(i=>!search||i.name.toLowerCase().includes(search.toLowerCase())||i.topic.toLowerCase().includes(search.toLowerCase()));
+
+  /* ── INFLUENCEURS dérivés des articles collectés (réseaux sociaux uniquement) ── */
+  const SOCIAL_PLATFORMS=["twitter","x","facebook","instagram","tiktok","reddit","youtube"];
+  const inflMap={};
+  liveItems.forEach(a=>{
+    if(!SOCIAL_PLATFORMS.includes((a.platform||"").toLowerCase())) return;
+    const key=a.author||a.sourceName;
+    if(!key||key.length<2) return;
+    if(!inflMap[key]) inflMap[key]={name:key,platform:a.platform||a.platformLabel||"Autre",mentions:0,engagement:0,sentiments:{},topics:{},lang:a.lang||""};
+    const inf=inflMap[key];
+    inf.mentions+=1;
+    inf.engagement+=(a.likes||0)+(a.shares||0);
+    inf.sentiments[a.sentiment||"neutre"]=(inf.sentiments[a.sentiment||"neutre"]||0)+1;
+    (a.matchedKW||[]).forEach(kw=>{inf.topics[kw]=(inf.topics[kw]||0)+1;});
+  });
+  const inflList=Object.values(inflMap).map(inf=>({
+    ...inf,
+    sentiment:Object.entries(inf.sentiments).sort((a,b)=>b[1]-a[1])[0]?.[0]||"neutre",
+    topic:Object.entries(inf.topics).sort((a,b)=>b[1]-a[1])[0]?.[0]||inf.platform,
+    reach:inf.engagement>1000?"Très haut":inf.engagement>200?"Haut":inf.engagement>50?"Moyen":"Faible",
+  })).sort((a,b)=>b.engagement-a.engagement);
+  const ftInfl=inflList.filter(i=>!search||i.name.toLowerCase().includes(search.toLowerCase())||i.topic.toLowerCase().includes(search.toLowerCase()));
+
   const ftReg  = regions.filter(r=>!search||r.name.toLowerCase().includes(search.toLowerCase()));
 
   /* ── TABS ── */
@@ -1031,7 +1084,7 @@ export default function PNVD() {
       <div style={{maxWidth:1600,margin:"0 auto",padding:16}}>
         {/* KPI ROW */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16}}>
-          {[{l:"Mentions totales",v:fmtN(mCnt),d:dashStats?`${fmtN(liveItems.length)} collectées`:"Chargement…",up:true,c:C.blue,i:"📡"},{l:"Sentiment positif",v:dashStats?`${dashStats.sentiment.positif_pct}%`:"—",d:dashStats?`${dashStats.sentiment.negatif_pct}% négatif`:"—",up:true,c:C.green,i:"✅"},{l:"Alertes actives",v:String(unread),d:`${unread} non lues`,up:false,c:C.red,i:"⚡"},{l:"Articles en base",v:fmtN(totalIng),d:`${fmtN(liveItems.length)} dans la fenêtre 24h`,up:true,c:C.gold,i:"🗄"}].map((s,i)=>(
+          {[{l:"Mentions totales",v:fmtN(mCnt),d:dashStats?`${fmtN(liveItems.length)} collectées`:"Chargement…",up:true,c:C.blue,i:"📡"},{l:"Sentiment positif",v:dashStats?`${dashStats.sentiment.positif_pct}%`:"—",d:dashStats?`${dashStats.sentiment.negatif_pct}% négatif`:"—",up:true,c:C.green,i:"✅"},{l:"Alertes actives",v:String(unread),d:dashStats?.disinfoCount>0?`${dashStats.disinfoCount} désinformation détectée${dashStats.disinfoCount>1?"s":""}`:`${unread} non lues`,up:false,c:C.red,i:"⚡"},{l:"Articles en base",v:fmtN(totalIng),d:`${fmtN(liveItems.length)} dans la fenêtre 24h`,up:true,c:C.gold,i:"🗄"}].map((s,i)=>(
             <div key={i} className="hov" style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 16px",borderBottom:`3px solid ${s.c}`,animation:`fadeUp ${.08*i}s ease`,cursor:"default"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7}}><span style={{fontSize:9,color:C.textM,letterSpacing:.8,textTransform:"uppercase"}}>{s.l}</span><span style={{fontSize:18}}>{s.i}</span></div>
               <div style={{fontSize:26,fontWeight:900,letterSpacing:-1,marginBottom:3}}>{s.v}</div>
@@ -1094,7 +1147,19 @@ export default function PNVD() {
               </div>
               <div style={{background:C.card,border:`1px solid ${C.purple}44`,borderRadius:12,padding:16,cursor:"pointer"}} onClick={()=>setTab("nlp")}>
                 <div style={{fontWeight:700,fontSize:13,color:C.purple,marginBottom:8}}>🧠 Module NLP IA</div>
-                {[{l:"Analyses FR",v:fmtN(nlpHist.length*12+247)},{l:"Analyses WOL",v:fmtN(nlpHist.length*3+54)},{l:"Précision",v:"94.2%"},{l:"Désinformation",v:"38 détectées"}].map(({l,v},i)=>(
+                {(()=>{
+                  const nFR    = nlpHist.filter(h=>h.result.langue_detectee==="FR").length;
+                  const nWOL   = nlpHist.filter(h=>h.result.langue_detectee==="WOL").length;
+                  const avgConf= nlpHist.length?Math.round(nlpHist.reduce((s,h)=>s+(h.result.confiance||0),0)/nlpHist.length):null;
+                  const nDis   = nlpHist.filter(h=>h.result.desinformation_score>60).length;
+                  const has    = nlpHist.length>0;
+                  return [
+                    {l:"Analyses FR",      v:has?fmtN(nFR):"—"},
+                    {l:"Analyses WOL",     v:has?fmtN(nWOL):"—"},
+                    {l:"Confiance moy.",   v:has?`${avgConf}%`:"—"},
+                    {l:"Désinformation",   v:has?`${nDis} détectée${nDis>1?"s":""}`:"—"},
+                  ];
+                })().map(({l,v},i)=>(
                   <div key={i} style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><span style={{fontSize:11,color:C.textM}}>{l}</span><span style={{fontSize:11,fontWeight:700,color:C.purple,fontFamily:"monospace"}}>{v}</span></div>
                 ))}
                 <div style={{marginTop:8,fontSize:10.5,color:C.purple,textAlign:"center",borderTop:`1px solid ${C.purple}33`,paddingTop:8}}>Ouvrir l'analyse →</div>
@@ -1194,11 +1259,22 @@ export default function PNVD() {
         )}
 
         {/* ══ SOURCES ══ */}
-        {tab==="sources"&&(
+        {tab==="sources"&&(()=>{
+          const now1h = Date.now()-3600000;
+          const mentionsH = liveItems.filter(a=>new Date(a.time).getTime()>=now1h).length;
+          const langs = [...new Set(liveItems.map(a=>a.lang).filter(Boolean))];
+          const couverture = conn.length ? Math.round(connOK/conn.length*100) : 0;
+          const hasData = liveItems.length>0;
+          return(
           <div>
             <div style={{fontWeight:700,fontSize:15,marginBottom:14}}>🔗 Sources surveillées</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
-              {[{l:"Sources actives",v:`${connOK}/${PLATFORMS.length}`,c:C.green},{l:"Mentions/heure",v:"3 420",c:C.blue},{l:"Langues",v:"FR · WOL",c:C.purple},{l:"Couverture",v:"98.2%",c:C.gold}].map(({l,v,c},i)=>(
+              {[
+                {l:"Sources actives",  v:`${connOK}/${conn.length}`,                         c:C.green},
+                {l:"Mentions/heure",   v:hasData?fmtN(mentionsH):"—",                        c:C.blue},
+                {l:"Langues détectées",v:hasData&&langs.length?langs.join(" · "):"—",         c:C.purple},
+                {l:"Couverture",       v:hasData?`${couverture}%`:"—",                        c:C.gold},
+              ].map(({l,v,c},i)=>(
                 <div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:14,borderTop:`3px solid ${c}`}}>
                   <div style={{fontSize:9.5,color:C.textM,marginBottom:6,textTransform:"uppercase",letterSpacing:.8}}>{l}</div>
                   <div style={{fontSize:22,fontWeight:900,color:c,fontFamily:"monospace"}}>{v}</div>
@@ -1206,7 +1282,14 @@ export default function PNVD() {
               ))}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12}}>
-              {conn.map((p,i)=>(
+              {conn.map((p,i)=>{
+                const platItems=liveItems.filter(a=>{
+                  const m=(a.platform||"").toLowerCase();
+                  const n=(p.name||"").toLowerCase();
+                  return m===n||(n.includes("rss")&&(m==="presse"||m==="web"||m==="rss"))||(n.includes("twitter")&&m==="twitter")||(n==="gdelt"&&m==="web");
+                });
+                const platLangs=[...new Set(platItems.map(a=>a.lang).filter(Boolean))];
+                return(
                 <div key={i} className="hov" style={{background:C.card,border:`1.5px solid ${p.status==="connected"?p.color+"33":C.border}`,borderRadius:12,padding:16,borderLeft:`4px solid ${p.status==="connected"?p.color:p.status==="warning"?C.orange:C.textS}`}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
                     <PIcon color={p.color} icon={p.icon} size={36}/>
@@ -1219,7 +1302,11 @@ export default function PNVD() {
                     </span>
                   </div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
-                    {[{l:"Rate limit",v:`${p.rateLimit}/min`},{l:"Langue",v:"FR+WOL"},{l:"Type",v:"REST API"}].map(({l,v},j)=>(
+                    {[
+                      {l:"Rate limit", v:`${p.rateLimit}/min`},
+                      {l:"Ingérés",    v:p.ingested>0?fmtN(p.ingested):"—"},
+                      {l:"Langues",    v:platLangs.length?platLangs.join("+"):"—"},
+                    ].map(({l,v},j)=>(
                       <div key={j} style={{background:C.bg3,borderRadius:6,padding:"7px 9px"}}>
                         <div style={{fontSize:9,color:C.textS,marginBottom:3}}>{l}</div>
                         <div style={{fontSize:11,fontWeight:700,color:C.text}}>{v}</div>
@@ -1227,55 +1314,68 @@ export default function PNVD() {
                     ))}
                   </div>
                   <div style={{display:"flex",gap:6}}>
-                    <button className="btn btn-ghost" style={{flex:1,padding:"7px",fontSize:10.5}}>⚙️ Configurer</button>
+                    <button onClick={()=>{ setCfgPlat(p); setCfgDraft({rateLimit:p.rateLimit,endpoint:p.endpoint,active:p.status!=="offline",apiKey:p.apiKey||"",showKey:false}); }} className="btn btn-ghost" style={{flex:1,padding:"7px",fontSize:10.5}}>⚙️ Configurer</button>
                     <button onClick={()=>setTab("connecteurs")} className="btn btn-ghost" style={{padding:"7px 12px",fontSize:10.5}}>→ Connecteur</button>
                   </div>
                 </div>
-              ))}
+              );})}
             </div>
           </div>
-        )}
+        );})()}
 
         {/* ══ INFLUENCEURS ══ */}
-        {tab==="influenceurs"&&(
+        {tab==="influenceurs"&&(()=>{
+          const inflNeg=ftInfl.filter(i=>i.sentiment==="negatif").length;
+          const inflPortee=ftInfl.reduce((s,i)=>s+i.engagement,0);
+          const hasInfl=ftInfl.length>0;
+          return(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
               <div style={{fontWeight:700,fontSize:15}}>👥 Relais d'opinion identifiés</div>
-              <span style={{fontSize:11,color:C.textM}}>{ftInfl.length} profils surveillés</span>
+              <span style={{fontSize:11,color:C.textM}}>{hasInfl?`${ftInfl.length} auteurs détectés`:"Aucune donnée — API déconnectée"}</span>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
-              {[{l:"Influenceurs suivis",v:"847",c:C.blue},{l:"Portée cumulée",v:"12.4M",c:C.purple},{l:"Négatifs actifs",v:"142",c:C.red},{l:"Wolof influenceurs",v:"23%",c:C.green}].map(({l,v,c},i)=>(
+              {[
+                {l:"Auteurs détectés",  v:hasInfl?fmtN(ftInfl.length):"—",        c:C.blue},
+                {l:"Engagement cumulé", v:hasInfl?fmtN(inflPortee):"—",            c:C.purple},
+                {l:"Ton négatif",       v:hasInfl?fmtN(inflNeg):"—",               c:C.red},
+                {l:"Portée maximale",   v:hasInfl?(ftInfl[0]?.reach||"—"):"—",     c:C.green},
+              ].map(({l,v,c},i)=>(
                 <div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:12,borderLeft:`3px solid ${c}`}}>
                   <div style={{fontSize:9,color:C.textM,marginBottom:5,textTransform:"uppercase",letterSpacing:.7}}>{l}</div>
                   <div style={{fontSize:20,fontWeight:900,color:c,fontFamily:"monospace"}}>{v}</div>
                 </div>
               ))}
             </div>
+            {!hasInfl?(
+              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:60,gap:10}}>
+                <div style={{fontSize:40,opacity:.2}}>👥</div>
+                <div style={{fontWeight:700,color:C.textM}}>Aucun auteur détecté</div>
+                <div style={{fontSize:11,color:C.textS}}>Les relais d'opinion apparaissent dès que des articles sont collectés via l'API.</div>
+              </div>
+            ):(
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden"}}>
-              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr 1fr 80px",gap:0}}>
-                {["Identifiant","Plateforme","Abonnés","Portée","Sujet","Sentiment","Action"].map(h=>(
+              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr 1fr",gap:0}}>
+                {["Auteur","Plateforme","Mentions","Engagement","Sujet","Sentiment"].map(h=>(
                   <div key={h} style={{padding:"9px 14px",fontSize:9.5,color:C.textM,fontWeight:700,letterSpacing:.5,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase"}}>{h}</div>
                 ))}
               </div>
               {ftInfl.map((inf,i)=>(
-                <div key={i} className="hov" style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr 1fr 80px",borderBottom:`1px solid ${C.border}22`,background:i%2===0?C.bg2:"transparent",cursor:"pointer"}}>
+                <div key={i} className="hov" style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr 1fr",borderBottom:`1px solid ${C.border}22`,background:i%2===0?C.bg2:"transparent",cursor:"pointer"}}>
                   <div style={{padding:"11px 14px",display:"flex",alignItems:"center",gap:8}}>
-                    {inf.verified&&<span style={{fontSize:11,color:C.blue}}>✓</span>}
                     <span style={{fontWeight:600,fontSize:12}}>{inf.name}</span>
                   </div>
                   <div style={{padding:"11px 14px",fontSize:11,color:C.textM}}>{inf.platform}</div>
-                  <div style={{padding:"11px 14px",fontSize:12,fontWeight:700,fontFamily:"monospace"}}>{inf.followers}</div>
-                  <div style={{padding:"11px 14px"}}>
-                    <span style={{fontSize:9.5,fontWeight:700,color:inf.reach==="Très haut"||inf.reach==="Haut"?C.green:C.blue}}>{inf.reach}</span>
-                  </div>
-                  <div style={{padding:"11px 14px",fontSize:11,color:C.textM}}>{inf.topic}</div>
+                  <div style={{padding:"11px 14px",fontSize:12,fontWeight:700,fontFamily:"monospace",color:C.blue}}>{fmtN(inf.mentions)}</div>
+                  <div style={{padding:"11px 14px",fontSize:12,fontWeight:700,fontFamily:"monospace",color:inf.reach==="Très haut"||inf.reach==="Haut"?C.green:C.textM}}>{fmtN(inf.engagement)}</div>
+                  <div style={{padding:"11px 14px",fontSize:11,color:C.textM,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inf.topic||"—"}</div>
                   <div style={{padding:"11px 14px"}}><SBadge s={inf.sentiment} C={C}/></div>
-                  <div style={{padding:"11px 14px"}}><button className="btn btn-ghost" style={{padding:"4px 9px",fontSize:9.5}}>Suivre</button></div>
                 </div>
               ))}
             </div>
+            )}
           </div>
-        )}
+        );})()}
 
         {/* ══ CONNECTEURS ══ */}
         {tab==="connecteurs"&&(
@@ -1840,6 +1940,90 @@ export default function PNVD() {
           </div>
         )}
 
+
+        {/* ══ MODAL CONFIGURATION SOURCE ══ */}
+        {configPlatform&&(
+          <div onClick={()=>setCfgPlat(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.72)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeUp .2s ease"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:C.card,border:`1.5px solid ${configPlatform.color}55`,borderRadius:16,padding:24,width:480,maxWidth:"95vw",boxShadow:`0 0 80px ${configPlatform.color}22,0 32px 80px #000A`}}>
+
+              {/* En-tête */}
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20,paddingBottom:14,borderBottom:`1px solid ${C.border}`}}>
+                <PIcon color={configPlatform.color} icon={configPlatform.icon} size={44}/>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:900,fontSize:15}}>⚙️ {configPlatform.name}</div>
+                  <div style={{fontSize:10,color:C.textM,fontFamily:"monospace",marginTop:3}}>{cfgDraft.endpoint}</div>
+                </div>
+                <button onClick={()=>setCfgPlat(null)} className="btn btn-ghost" style={{padding:"4px 10px",fontSize:14,lineHeight:1}}>✕</button>
+              </div>
+
+              {/* Toggle actif */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,padding:"10px 14px",background:C.bg3,borderRadius:9,border:`1px solid ${C.border}`}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:12}}>Source active</div>
+                  <div style={{fontSize:10,color:C.textM,marginTop:2}}>Activer / désactiver la collecte</div>
+                </div>
+                <div onClick={()=>setCfgDraft(d=>({...d,active:!d.active}))} style={{width:44,height:23,borderRadius:12,background:cfgDraft.active?C.green:C.textS,cursor:"pointer",position:"relative",transition:"background .2s",flexShrink:0}}>
+                  <div style={{position:"absolute",top:3,left:cfgDraft.active?22:3,width:17,height:17,borderRadius:"50%",background:"#fff",transition:"left .2s",boxShadow:"0 1px 4px #0006"}}/>
+                </div>
+              </div>
+
+              {/* Clé API (uniquement pour les plateformes qui en ont besoin) */}
+              {["yt","x","fb","ig","tt"].includes(configPlatform.id)&&(
+                <div style={{marginBottom:14}}>
+                  <div style={{fontSize:10,color:C.textM,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:.7}}>Clé API</div>
+                  <div style={{position:"relative"}}>
+                    <input type={cfgDraft.showKey?"text":"password"} className="inp" placeholder={`Clé API ${configPlatform.name}…`} value={cfgDraft.apiKey||""} onChange={e=>setCfgDraft(d=>({...d,apiKey:e.target.value}))} style={{paddingRight:76}}/>
+                    <button type="button" onClick={()=>setCfgDraft(d=>({...d,showKey:!d.showKey}))} className="btn btn-ghost" style={{position:"absolute",right:5,top:5,padding:"3px 9px",fontSize:10,border:"none",background:"transparent"}}>
+                      {cfgDraft.showKey?"Masquer":"Afficher"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Rate limit */}
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:10,color:C.textM,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:.7}}>Rate limit (req/min)</div>
+                <input type="number" className="inp" min={1} max={9999} value={cfgDraft.rateLimit||""} onChange={e=>setCfgDraft(d=>({...d,rateLimit:Number(e.target.value)}))}/>
+              </div>
+
+              {/* Endpoint */}
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:10,color:C.textM,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:.7}}>Endpoint</div>
+                <input type="text" className="inp" value={cfgDraft.endpoint||""} onChange={e=>setCfgDraft(d=>({...d,endpoint:e.target.value}))}/>
+              </div>
+
+              {/* Statistiques actuelles */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:20}}>
+                {[
+                  {l:"Statut",    v:configPlatform.status==="connected"?"EN LIGNE":configPlatform.status==="warning"?"DÉGRADÉ":"HORS LIGNE", c:configPlatform.status==="connected"?C.green:configPlatform.status==="warning"?C.orange:C.textS},
+                  {l:"Ingérés",   v:fmtN(configPlatform.ingested||0),  c:C.blue},
+                  {l:"Latence",   v:`${configPlatform.latency||0} ms`,  c:C.gold},
+                ].map(({l,v,c},i)=>(
+                  <div key={i} style={{background:C.bg3,borderRadius:7,padding:"9px 11px",border:`1px solid ${C.border}`}}>
+                    <div style={{fontSize:9,color:C.textS,marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{l}</div>
+                    <div style={{fontSize:12,fontWeight:700,color:c,fontFamily:"monospace"}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Boutons d'action */}
+              <div style={{display:"flex",gap:9}}>
+                <button onClick={()=>setCfgPlat(null)} className="btn btn-ghost" style={{flex:1,padding:"10px",fontSize:12}}>Annuler</button>
+                <button onClick={()=>{
+                  setConn(prev=>prev.map(c=>c.id===configPlatform.id
+                    ?{...c,rateLimit:cfgDraft.rateLimit,endpoint:cfgDraft.endpoint,status:cfgDraft.active?(c.status==="offline"?"connected":c.status):"offline",apiKey:cfgDraft.apiKey}
+                    :c
+                  ));
+                  if(configPlatform.id==="yt"&&cfgDraft.apiKey) setYtKey(cfgDraft.apiKey);
+                  setCfgPlat(null);
+                }} className="btn btn-gold" style={{flex:2,padding:"10px",fontSize:12,fontWeight:900}}>
+                  ✓ Sauvegarder
+                </button>
+              </div>
+
+            </div>
+          </div>
+        )}
 
         {/* FOOTER */}
         <div style={{marginTop:20,paddingTop:12,borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
