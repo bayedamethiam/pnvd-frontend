@@ -233,9 +233,13 @@ export default function PNVDAuth({ onAuthenticated } = {}) {
   /* ── LOGOUT ── */
   const handleLogout=()=>{ setPhase("level"); setSelLevel(null); setUserId(""); setPassword(""); setOtp(""); setVSteps([]); setProgress(0); setSessUser(null); setShowLogout(false); setLoginErr(""); };
 
-  /* ── IF LOGGED IN, show dashboard shell ── */
+  /* ── IF LOGGED IN, notify parent via effect (évite setState pendant le render) ── */
+  useEffect(()=>{
+    if(phase==="success"&&sessionUser&&onAuthenticated) onAuthenticated(sessionUser);
+  },[phase,sessionUser]);
+
   if(phase==="success"&&sessionUser){
-    if(onAuthenticated){ onAuthenticated(sessionUser); return null; }
+    if(onAuthenticated) return null;
     return <DashboardShell user={sessionUser} onLogout={handleLogout} now={now}/>;
   }
 
