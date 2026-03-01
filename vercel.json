@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-  "installCommand": "npm install"
+  "installCommand": "cd pnvd-frontend && npm install",
+  "buildCommand": "cd pnvd-frontend && npm run build",
+  "outputDirectory": "pnvd-frontend/dist"
 }
