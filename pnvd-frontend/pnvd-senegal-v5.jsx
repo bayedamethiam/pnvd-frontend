@@ -687,6 +687,7 @@ export default function PNVD() {
   const [showYtKey,setShowYK]  = useState(false);
   const [configPlatform,setCfgPlat] = useState(null);
   const [cfgDraft,setCfgDraft]      = useState({});
+  const [cfgSaving,setCfgSaving]    = useState(false);
   const [kwFilter,setKwF]      = useState("all");
   const [selPlatform,setSelPl] = useState(null); // null = toutes les plateformes
   const [selKW,setSelKW]       = useState(null);
@@ -802,12 +803,13 @@ export default function PNVD() {
   /* ── DASHBOARD STATS (réelles) ── */
   const fetchDashboard = useCallback(async()=>{
     try {
-      const [dashRes, topicsRes, kwRes, healthRes, connRes] = await Promise.all([
+      const [dashRes, topicsRes, kwRes, healthRes, connRes, cfgRes] = await Promise.all([
         fetch(`${API_BASE}/stats/dashboard?hours=24`),
         fetch(`${API_BASE}/stats/topics?hours=24&limit=10`),
         fetch(`${API_BASE}/stats/keywords?hours=24`),
         fetch(`${API_BASE}/health`),
         fetch(`${API_BASE}/connectors/health`),
+        fetch(`${API_BASE}/connectors/config`),
       ]);
       if(dashRes.ok){
         const d = await dashRes.json();
@@ -868,6 +870,20 @@ export default function PNVD() {
             status:   toStatus(info),
             latency:  info.latency_ms??0,
             errors:   info.status!=="ok"?1:0,
+          };
+        }));
+      }
+      if(cfgRes.ok){
+        const cfgData = await cfgRes.json();
+        setConn(prev=>prev.map(c=>{
+          const cfg = cfgData[c.id];
+          if(!cfg) return c;
+          return {
+            ...c,
+            hasApiKey: cfg.has_api_key,
+            rateLimit: cfg.rate_limit ?? c.rateLimit,
+            endpoint:  cfg.endpoint  ?? c.endpoint,
+            status: cfg.active ? c.status : "offline",
           };
         }));
       }
@@ -1970,9 +1986,14 @@ export default function PNVD() {
               {/* Clé API (uniquement pour les plateformes qui en ont besoin) */}
               {["yt","x","fb","ig","tt"].includes(configPlatform.id)&&(
                 <div style={{marginBottom:14}}>
-                  <div style={{fontSize:10,color:C.textM,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:.7}}>Clé API</div>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                    <div style={{fontSize:10,color:C.textM,fontWeight:700,textTransform:"uppercase",letterSpacing:.7}}>Clé API</div>
+                    {configPlatform.hasApiKey&&!cfgDraft.apiKey&&(
+                      <div style={{fontSize:9,color:C.green,fontWeight:700,background:C.green+"18",padding:"2px 7px",borderRadius:5}}>✓ Clé configurée</div>
+                    )}
+                  </div>
                   <div style={{position:"relative"}}>
-                    <input type={cfgDraft.showKey?"text":"password"} className="inp" placeholder={`Clé API ${configPlatform.name}…`} value={cfgDraft.apiKey||""} onChange={e=>setCfgDraft(d=>({...d,apiKey:e.target.value}))} style={{paddingRight:76}}/>
+                    <input type={cfgDraft.showKey?"text":"password"} className="inp" placeholder={configPlatform.hasApiKey?"••••••••••••••••••••":(`Clé API ${configPlatform.name}…`)} value={cfgDraft.apiKey||""} onChange={e=>setCfgDraft(d=>({...d,apiKey:e.target.value}))} style={{paddingRight:76}}/>
                     <button type="button" onClick={()=>setCfgDraft(d=>({...d,showKey:!d.showKey}))} className="btn btn-ghost" style={{position:"absolute",right:5,top:5,padding:"3px 9px",fontSize:10,border:"none",background:"transparent"}}>
                       {cfgDraft.showKey?"Masquer":"Afficher"}
                     </button>
@@ -2009,15 +2030,33 @@ export default function PNVD() {
               {/* Boutons d'action */}
               <div style={{display:"flex",gap:9}}>
                 <button onClick={()=>setCfgPlat(null)} className="btn btn-ghost" style={{flex:1,padding:"10px",fontSize:12}}>Annuler</button>
-                <button onClick={()=>{
-                  setConn(prev=>prev.map(c=>c.id===configPlatform.id
-                    ?{...c,rateLimit:cfgDraft.rateLimit,endpoint:cfgDraft.endpoint,status:cfgDraft.active?(c.status==="offline"?"connected":c.status):"offline",apiKey:cfgDraft.apiKey}
-                    :c
-                  ));
-                  if(configPlatform.id==="yt"&&cfgDraft.apiKey) setYtKey(cfgDraft.apiKey);
+                <button disabled={cfgSaving} onClick={async()=>{
+                  setCfgSaving(true);
+                  try {
+                    const res = await fetch(`${API_BASE}/connectors/${configPlatform.id}/config`,{
+                      method:"PATCH",
+                      headers:{"Content-Type":"application/json"},
+                      body: JSON.stringify({
+                        api_key:    cfgDraft.apiKey  || null,
+                        rate_limit: cfgDraft.rateLimit,
+                        endpoint:   cfgDraft.endpoint,
+                        active:     cfgDraft.active,
+                      }),
+                    });
+                    const updated = res.ok ? await res.json() : null;
+                    setConn(prev=>prev.map(c=>c.id===configPlatform.id ? {
+                      ...c,
+                      rateLimit: updated?.rate_limit ?? cfgDraft.rateLimit,
+                      endpoint:  updated?.endpoint  ?? cfgDraft.endpoint,
+                      status:    cfgDraft.active ? (c.status==="offline"?"connected":c.status) : "offline",
+                      hasApiKey: updated?.has_api_key ?? (cfgDraft.apiKey ? true : c.hasApiKey),
+                    } : c));
+                    if(configPlatform.id==="yt"&&cfgDraft.apiKey) setYtKey(cfgDraft.apiKey);
+                  } catch(e){ console.error("Configurer save:",e); }
+                  setCfgSaving(false);
                   setCfgPlat(null);
                 }} className="btn btn-gold" style={{flex:2,padding:"10px",fontSize:12,fontWeight:900}}>
-                  ✓ Sauvegarder
+                  {cfgSaving ? "⏳ Sauvegarde…" : "✓ Sauvegarder"}
                 </button>
               </div>
 
