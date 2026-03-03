@@ -672,6 +672,7 @@ export default function PNVD() {
   /* PIPELINE */
   const [pipe,setPipe]         = useState({stage:"idle",progress:0});
   const [collectT,setCT]       = useState(null);
+  const [collectStatus,setCS]  = useState({});
 
   /* BENCHMARK */
 
@@ -803,13 +804,14 @@ export default function PNVD() {
   /* ── DASHBOARD STATS (réelles) ── */
   const fetchDashboard = useCallback(async()=>{
     try {
-      const [dashRes, topicsRes, kwRes, healthRes, connRes, cfgRes] = await Promise.all([
+      const [dashRes, topicsRes, kwRes, healthRes, connRes, cfgRes, srcRes] = await Promise.all([
         fetch(`${API_BASE}/stats/dashboard?hours=24`),
         fetch(`${API_BASE}/stats/topics?hours=24&limit=10`),
         fetch(`${API_BASE}/stats/keywords?hours=24`),
         fetch(`${API_BASE}/health`),
         fetch(`${API_BASE}/connectors/health`),
         fetch(`${API_BASE}/connectors/config`),
+        fetch(`${API_BASE}/collect/status`),
       ]);
       if(dashRes.ok){
         const d = await dashRes.json();
@@ -887,6 +889,17 @@ export default function PNVD() {
           };
         }));
       }
+      if(srcRes.ok){
+        const sources = await srcRes.json();
+        const PMAP = {rss:["presse","rss","web","news"],yt:["youtube"],x:["twitter"],reddit:["reddit"],gdelt:["gdelt"]};
+        const st = {};
+        for(const [cid, plats] of Object.entries(PMAP)){
+          const rel = sources.filter(s=>plats.includes((s.platform||"").toLowerCase()));
+          const ts  = rel.filter(s=>s.last_fetch).map(s=>new Date(s.last_fetch).getTime());
+          st[cid] = { last_fetch: ts.length ? new Date(Math.max(...ts)) : null, last_count: rel.reduce((a,s)=>a+(s.last_count||0),0) };
+        }
+        setCS(st);
+      }
     } catch(e){ console.error("fetchDashboard:",e); }
   },[]);
 
@@ -924,7 +937,7 @@ export default function PNVD() {
     setCT(id); setPipe({stage:"connecting",progress:8});
     fetch(`${API_BASE}/collect/trigger`,{method:"POST"}).catch(()=>{});
     [["authenticating",25],["fetching",52],["processing",76],["indexing",93],["done",100]].forEach(([s,p],i)=>setTimeout(()=>setPipe({stage:s,progress:p}),(i+1)*800));
-    setTimeout(()=>{ setCT(null); setTimeout(()=>setPipe({stage:"idle",progress:0}),1400); },5*800+600);
+    setTimeout(()=>{ setCT(null); setTimeout(()=>{ setPipe({stage:"idle",progress:0}); fetchDashboard(); },1400); },5*800+600);
   };
 
   const runNLP = useCallback(async()=>{
@@ -996,7 +1009,6 @@ export default function PNVD() {
   const TABS=[
     {id:"dashboard",   label:"Tableau de bord",icon:"▦"},
     {id:"flux",        label:"Flux live",       icon:"📡"},
-    {id:"sources",     label:"Sources",         icon:"🔗"},
     {id:"influenceurs",label:"Influenceurs",    icon:"👥"},
     {id:"connecteurs", label:"Connecteurs",     icon:"⚙️"},
     {id:"mots_cles",   label:"Mots-clés",       icon:"🔑"},
@@ -1274,71 +1286,6 @@ export default function PNVD() {
           </div>
         )}
 
-        {/* ══ SOURCES ══ */}
-        {tab==="sources"&&(()=>{
-          const now1h = Date.now()-3600000;
-          const mentionsH = liveItems.filter(a=>new Date(a.time).getTime()>=now1h).length;
-          const langs = [...new Set(liveItems.map(a=>a.lang).filter(Boolean))];
-          const couverture = conn.length ? Math.round(connOK/conn.length*100) : 0;
-          const hasData = liveItems.length>0;
-          return(
-          <div>
-            <div style={{fontWeight:700,fontSize:15,marginBottom:14}}>🔗 Sources surveillées</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
-              {[
-                {l:"Sources actives",  v:`${connOK}/${conn.length}`,                         c:C.green},
-                {l:"Mentions/heure",   v:hasData?fmtN(mentionsH):"—",                        c:C.blue},
-                {l:"Langues détectées",v:hasData&&langs.length?langs.join(" · "):"—",         c:C.purple},
-                {l:"Couverture",       v:hasData?`${couverture}%`:"—",                        c:C.gold},
-              ].map(({l,v,c},i)=>(
-                <div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:14,borderTop:`3px solid ${c}`}}>
-                  <div style={{fontSize:9.5,color:C.textM,marginBottom:6,textTransform:"uppercase",letterSpacing:.8}}>{l}</div>
-                  <div style={{fontSize:22,fontWeight:900,color:c,fontFamily:"monospace"}}>{v}</div>
-                </div>
-              ))}
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12}}>
-              {conn.map((p,i)=>{
-                const platItems=liveItems.filter(a=>{
-                  const m=(a.platform||"").toLowerCase();
-                  const n=(p.name||"").toLowerCase();
-                  return m===n||(n.includes("rss")&&(m==="presse"||m==="web"||m==="rss"))||(n.includes("twitter")&&m==="twitter")||(n==="gdelt"&&m==="web");
-                });
-                const platLangs=[...new Set(platItems.map(a=>a.lang).filter(Boolean))];
-                return(
-                <div key={i} className="hov" style={{background:C.card,border:`1.5px solid ${p.status==="connected"?p.color+"33":C.border}`,borderRadius:12,padding:16,borderLeft:`4px solid ${p.status==="connected"?p.color:p.status==="warning"?C.orange:C.textS}`}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                    <PIcon color={p.color} icon={p.icon} size={36}/>
-                    <div style={{flex:1}}>
-                      <div style={{fontWeight:700,fontSize:14}}>{p.name}</div>
-                      <div style={{fontSize:9.5,color:C.textS,fontFamily:"monospace"}}>{p.endpoint}</div>
-                    </div>
-                    <span style={{fontSize:9.5,fontWeight:700,padding:"3px 9px",borderRadius:6,background:p.status==="connected"?C.greenD:p.status==="warning"?"#2A1A00":C.bg3,color:p.status==="connected"?C.green:p.status==="warning"?C.orange:C.textS,border:`1px solid ${p.status==="connected"?C.green+"44":p.status==="warning"?C.orange+"44":C.border}`}}>
-                      {p.status==="connected"?"EN LIGNE":p.status==="warning"?"DÉGRADÉ":"HORS LIGNE"}
-                    </span>
-                  </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
-                    {[
-                      {l:"Rate limit", v:`${p.rateLimit}/min`},
-                      {l:"Ingérés",    v:p.ingested>0?fmtN(p.ingested):"—"},
-                      {l:"Langues",    v:platLangs.length?platLangs.join("+"):"—"},
-                    ].map(({l,v},j)=>(
-                      <div key={j} style={{background:C.bg3,borderRadius:6,padding:"7px 9px"}}>
-                        <div style={{fontSize:9,color:C.textS,marginBottom:3}}>{l}</div>
-                        <div style={{fontSize:11,fontWeight:700,color:C.text}}>{v}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{display:"flex",gap:6}}>
-                    <button onClick={()=>{ setCfgPlat(p); setCfgDraft({rateLimit:p.rateLimit,endpoint:p.endpoint,active:p.status!=="offline",apiKey:p.apiKey||"",showKey:false}); }} className="btn btn-ghost" style={{flex:1,padding:"7px",fontSize:10.5}}>⚙️ Configurer</button>
-                    <button onClick={()=>setTab("connecteurs")} className="btn btn-ghost" style={{padding:"7px 12px",fontSize:10.5}}>→ Connecteur</button>
-                  </div>
-                </div>
-              );})}
-            </div>
-          </div>
-        );})()}
-
         {/* ══ INFLUENCEURS ══ */}
         {tab==="influenceurs"&&(()=>{
           const inflNeg=ftInfl.filter(i=>i.sentiment==="negatif").length;
@@ -1393,30 +1340,67 @@ export default function PNVD() {
           </div>
         );})()}
 
-        {/* ══ CONNECTEURS ══ */}
-        {tab==="connecteurs"&&(
+        {/* ══ CONNECTEURS (unifié Sources + Connecteurs) ══ */}
+        {tab==="connecteurs"&&(()=>{
+          const now1h = Date.now()-3600000;
+          const mentionsH = liveItems.filter(a=>new Date(a.time).getTime()>=now1h).length;
+          const langs = [...new Set(liveItems.map(a=>a.lang).filter(Boolean))];
+          const couverture = conn.length ? Math.round(connOK/conn.length*100) : 0;
+          const fmtFetch = dt => {
+            if(!dt) return "Jamais";
+            const diff = Date.now()-dt.getTime();
+            if(diff<60000)   return "À l'instant";
+            if(diff<3600000) return `Il y a ${Math.round(diff/60000)} min`;
+            if(diff<86400000)return `Il y a ${Math.round(diff/3600000)}h`;
+            return dt.toLocaleDateString("fr-FR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+          };
+          return(
           <div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-              <div>
-                <div style={{fontWeight:700,fontSize:15}}>⚙️ Gestion des connecteurs API</div>
-                <div style={{fontSize:11,color:C.textM,marginTop:2}}>{connOK}/{PLATFORMS.length} actifs · Pipeline de collecte en temps réel</div>
-              </div>
-              <button onClick={()=>simCollect("all")} className="btn btn-gold" style={{padding:"8px 18px",fontSize:12}}>▶ SIMULER PIPELINE</button>
+            {/* KPIs */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16}}>
+              {[
+                {l:"Connecteurs actifs", v:`${connOK}/${conn.length}`,       c:C.green},
+                {l:"Mentions / heure",   v:liveItems.length?fmtN(mentionsH):"—", c:C.blue},
+                {l:"Langues détectées",  v:langs.length?langs.join(" · "):"—",   c:C.purple},
+                {l:"Couverture",         v:`${couverture}%`,                      c:C.gold},
+              ].map(({l,v,c},i)=>(
+                <div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:14,borderTop:`3px solid ${c}`}}>
+                  <div style={{fontSize:9.5,color:C.textM,marginBottom:6,textTransform:"uppercase",letterSpacing:.8}}>{l}</div>
+                  <div style={{fontSize:20,fontWeight:900,color:c,fontFamily:"monospace"}}>{v}</div>
+                </div>
+              ))}
             </div>
+            {/* Header + bouton global */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontSize:11,color:C.textM}}>{connOK}/{PLATFORMS.length} actifs · Pipeline de collecte automatique toutes les 15 min</div>
+              <button onClick={()=>simCollect("all")} disabled={collectT==="all"} className="btn btn-gold" style={{padding:"8px 18px",fontSize:12}}>
+                {collectT==="all"?<span style={{display:"flex",alignItems:"center",gap:6}}><Spin size={12}/>{STAGE_LB[pipe.stage]}</span>:"▶ Lancer la collecte"}
+              </button>
+            </div>
+            {/* Barre de progression pipeline */}
             {pipe.stage!=="idle"&&(
               <div style={{background:C.card,border:`1px solid ${C.borderH}`,borderRadius:10,padding:14,marginBottom:14,animation:"fadeUp .3s ease"}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-                  <span style={{fontSize:12,fontWeight:700,color:C.goldL}}>Pipeline global</span>
+                  <span style={{fontSize:12,fontWeight:700,color:C.goldL}}>Pipeline en cours</span>
                   <span style={{fontSize:12,color:pipe.stage==="done"?C.green:C.gold,fontWeight:700}}>{STAGE_LB[pipe.stage]}</span>
                 </div>
                 <MBar pct={pipe.progress} color={pipe.stage==="done"?C.green:C.gold} h={8}/>
                 <div style={{fontSize:9.5,color:C.textS,marginTop:5,textAlign:"right"}}>{pipe.progress}%</div>
               </div>
             )}
+            {/* Cartes connecteurs */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12}}>
-              {conn.map((c,i)=>(
+              {conn.map((c,i)=>{
+                const platItems=liveItems.filter(a=>{
+                  const m=(a.platform||"").toLowerCase(), n=(c.name||"").toLowerCase();
+                  return m===n||(n.includes("rss")&&(m==="presse"||m==="web"||m==="rss"))||(n.includes("twitter")&&m==="twitter")||(n==="gdelt"&&m==="web");
+                });
+                const platLangs=[...new Set(platItems.map(a=>a.lang).filter(Boolean))];
+                const cs = collectStatus[c.id];
+                return(
                 <div key={i} className="hov" style={{background:C.card,border:`1.5px solid ${c.status==="connected"?c.color+"33":C.border}`,borderRadius:12,padding:16,borderLeft:`4px solid ${c.status==="connected"?c.color:c.status==="warning"?C.orange:C.textS}`}}>
-                  <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12}}>
+                  {/* Titre + toggle */}
+                  <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:10}}>
                     <div style={{display:"flex",alignItems:"center",gap:9}}>
                       <PIcon color={c.color} icon={c.icon} size={34}/>
                       <div>
@@ -1424,32 +1408,46 @@ export default function PNVD() {
                         <div style={{fontSize:9,color:C.textS,fontFamily:"monospace"}}>{c.endpoint}</div>
                       </div>
                     </div>
-                    <Toggle on={c.status==="connected"} onChange={()=>toggleConn(c.id)} C={C}/>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:9.5,fontWeight:700,padding:"3px 9px",borderRadius:6,background:c.status==="connected"?C.greenD:c.status==="warning"?"#2A1A00":C.bg3,color:c.status==="connected"?C.green:c.status==="warning"?C.orange:C.textS,border:`1px solid ${c.status==="connected"?C.green+"44":c.status==="warning"?C.orange+"44":C.border}`}}>
+                        {c.status==="connected"?"EN LIGNE":c.status==="warning"?"DÉGRADÉ":"HORS LIGNE"}
+                      </span>
+                      <Toggle on={c.status==="connected"} onChange={()=>toggleConn(c.id)} C={C}/>
+                    </div>
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7,marginBottom:12}}>
-                    {[{l:"Usage",v:`${c.usage}%`,b:c.usage,col:c.usage>80?C.red:c.usage>60?C.orange:C.green},{l:"Latence",v:`${c.latency}ms`,b:c.latency/4,col:c.latency>200?C.orange:C.green},{l:"Erreurs",v:c.errors,b:c.errors*20,col:c.errors>3?C.red:C.green}].map(({l,v,b,col},j)=>(
+                  {/* Métriques */}
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7,marginBottom:10}}>
+                    {[
+                      {l:"Latence",  v:`${c.latency}ms`, b:c.latency/4,   col:c.latency>200?C.orange:C.green},
+                      {l:"Erreurs",  v:c.errors,          b:c.errors*20,   col:c.errors>3?C.red:C.green},
+                      {l:"Ingérés",  v:c.ingested>0?fmtN(c.ingested):"—", b:0, col:C.blue},
+                    ].map(({l,v,b,col},j)=>(
                       <div key={j} style={{background:C.bg3,borderRadius:6,padding:"7px 9px"}}>
                         <div style={{fontSize:9,color:C.textS,marginBottom:3}}>{l}</div>
-                        <div style={{fontSize:15,fontWeight:900,color:C.text,fontFamily:"monospace",marginBottom:4}}>{v}</div>
-                        <MBar pct={b} color={col} h={3}/>
+                        <div style={{fontSize:13,fontWeight:900,color:C.text,fontFamily:"monospace",marginBottom:b>0?4:0}}>{v}</div>
+                        {b>0&&<MBar pct={b} color={col} h={3}/>}
                       </div>
                     ))}
                   </div>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,fontSize:10,color:C.textM}}>
-                    <span>📦 {fmtN(c.ingested)} ingérés</span>
-                    <span>Limite: {c.rateLimit} req/min</span>
+                  {/* Dernière collecte + infos */}
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,fontSize:10,color:C.textM,background:C.bg3,borderRadius:6,padding:"6px 10px"}}>
+                    <span>🕐 {fmtFetch(cs?.last_fetch)}</span>
+                    <span style={{color:C.textS}}>
+                      {platLangs.length?platLangs.join(" · "):"—"} · {c.rateLimit} req/min
+                    </span>
                   </div>
+                  {/* Boutons */}
                   <div style={{display:"flex",gap:7}}>
-                    <button onClick={()=>simCollect(c.id)} disabled={c.status!=="connected"||collectT===c.id} className="btn btn-ghost" style={{flex:1,padding:"7px",fontSize:10.5,color:c.status!=="connected"?C.textS:C.textM}}>
+                    <button onClick={()=>simCollect(c.id)} disabled={c.status!=="connected"||collectT===c.id||collectT==="all"} className="btn btn-ghost" style={{flex:1,padding:"7px",fontSize:10.5,color:c.status!=="connected"?C.textS:C.textM}}>
                       {collectT===c.id?<span style={{display:"flex",alignItems:"center",gap:5,justifyContent:"center"}}><Spin size={12}/>{STAGE_LB[pipe.stage]}</span>:"🔄 Collecter"}
                     </button>
-                    <button className="btn btn-ghost" style={{padding:"7px 12px",fontSize:10.5}}>⚙️</button>
+                    <button onClick={()=>{setCfgPlat(c);setCfgDraft({rateLimit:c.rateLimit,endpoint:c.endpoint,active:c.status!=="offline",apiKey:c.apiKey||"",showKey:false});}} className="btn btn-ghost" style={{padding:"7px 12px",fontSize:10.5}}>⚙️</button>
                   </div>
                 </div>
-              ))}
+              );})}
             </div>
           </div>
-        )}
+        );})()}
 
         {/* ══ MOTS-CLÉS ══ */}
         {tab==="mots_cles"&&(
