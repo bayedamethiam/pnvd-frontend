@@ -696,6 +696,18 @@ export default function PNVD() {
   const [kwStats,setKwStats]   = useState([]);
   const autoRef                = useRef(null);
 
+  /* MINISTÈRES */
+  const [ministries,setMinistries]       = useState([]);
+  const [selMinistry,setSelMin]          = useState(null); // ministry object
+  const [minDashboard,setMinDash]        = useState(null); // dashboard data
+  const [minArticles,setMinArt]          = useState([]);
+  const [minSentPeriod,setMinSentPeriod] = useState("monthly");
+  const [minLoading,setMinLoading]       = useState(false);
+  const [minKws,setMinKws]              = useState([]);
+  const [minKwLoading,setMinKwLoading]  = useState(false);
+  const [minNewKw,setMinNewKw]          = useState({term:"",type:"keyword",weight:3});
+  const [minAggLoading,setMinAggLoad]   = useState(false);
+
   const unread   = alerts.filter(a=>!a.read).length;
   const connOK   = conn.filter(c=>c.status==="connected").length;
   const STAGE_LB = {idle:"En attente",connecting:"Connexion...",authenticating:"Auth OAuth...",fetching:"Récupération...",processing:"Traitement NLP...",indexing:"Indexation ES...",done:"✓ Terminé"};
@@ -927,6 +939,59 @@ export default function PNVD() {
       .catch(()=>{});
   },[]);
 
+  // Charge la liste des ministères
+  useEffect(()=>{
+    fetch(`${API_BASE}/ministries`)
+      .then(r=>r.ok?r.json():[])
+      .then(data=>{ setMinistries(data); if(data.length&&!selMinistry){ const m=data.find(x=>x.level==="ministry")||data[0]; setSelMin(m); } })
+      .catch(()=>{});
+  },[]);
+
+  // Charge le dashboard d'un ministère sélectionné
+  const fetchMinistryDashboard = useCallback(async(m)=>{
+    if(!m) return;
+    setMinLoading(true);
+    try {
+      const [dashRes, artRes, kwRes] = await Promise.all([
+        fetch(`${API_BASE}/ministries/${m.id}/dashboard`),
+        fetch(`${API_BASE}/ministries/${m.id}/articles?days=30&limit=20`),
+        fetch(`${API_BASE}/ministries/${m.id}/keywords`),
+      ]);
+      if(dashRes.ok) setMinDash(await dashRes.json());
+      if(artRes.ok)  setMinArt(await artRes.json());
+      if(kwRes.ok)   setMinKws(await kwRes.json());
+    } catch(e){ console.error("fetchMinistryDashboard:",e); }
+    setMinLoading(false);
+  },[]);
+
+  useEffect(()=>{ if(selMinistry) fetchMinistryDashboard(selMinistry); },[selMinistry]);
+
+  const addMinKw = async()=>{
+    if(!minNewKw.term.trim()||!selMinistry) return;
+    setMinKwLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/ministries/${selMinistry.id}/keywords`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(minNewKw)});
+      if(res.ok){ setMinNewKw({term:"",type:"keyword",weight:3}); fetchMinistryDashboard(selMinistry); }
+    } catch(e){}
+    setMinKwLoading(false);
+  };
+
+  const deleteMinKw = async(kwId)=>{
+    if(!selMinistry) return;
+    await fetch(`${API_BASE}/ministries/${selMinistry.id}/keywords/${kwId}`,{method:"DELETE"}).catch(()=>{});
+    fetchMinistryDashboard(selMinistry);
+  };
+
+  const triggerMinAggregate = async()=>{
+    if(!selMinistry) return;
+    setMinAggLoad(true);
+    try {
+      await fetch(`${API_BASE}/ministries/${selMinistry.id}/aggregate`,{method:"POST"});
+      await fetchMinistryDashboard(selMinistry);
+    } catch(e){}
+    setMinAggLoad(false);
+  };
+
   /* ── ACTIONS ── */
   const toggleConn = id => setConn(p=>p.map(c=>c.id!==id?c:{...c,status:c.status==="connected"?"offline":"connected"}));
   const updateRule = (id,k,v) => setAR(p=>p.map(r=>r.id!==id?r:{...r,[k]:v}));
@@ -1016,6 +1081,7 @@ export default function PNVD() {
     {id:"nlp",         label:"Analyse NLP IA",  icon:"🧠"},
     {id:"themes",      label:"Thèmes",          icon:"🔍"},
     {id:"regions",     label:"Régions",         icon:"🗺"},
+    {id:"ministeres",  label:"Ministères",      icon:"🏛️"},
     {id:"rapports",    label:"Rapports PDF",    icon:"📄"},
   ];
 
@@ -1887,6 +1953,202 @@ export default function PNVD() {
             </div>
           </div>
         )}
+
+        {/* ══ MINISTÈRES ══ */}
+        {tab==="ministeres"&&(()=>{
+          const LEVEL_COLOR={presidence:"#1D4ED8",primature:"#7C3AED",pole:"#0891B2",ministry:"#059669"};
+          const sData = minDashboard?.latest_daily;
+          const pos = sData?.positive_count||0;
+          const neg = sData?.negative_count||0;
+          const neu = sData?.neutral_count||0;
+          const tot = sData?.total_mentions||0;
+          const avgScore = sData?.avg_sentiment_score||0;
+          const trending = sData?.trending_score||0;
+          const platBreak = sData?.platform_breakdown ? (typeof sData.platform_breakdown==="string"?JSON.parse(sData.platform_breakdown):sData.platform_breakdown) : {};
+          const topTopics = sData?.top_topics ? (typeof sData.top_topics==="string"?JSON.parse(sData.top_topics):sData.top_topics) : [];
+          const topTerms  = sData?.top_terms  ? (typeof sData.top_terms==="string"?JSON.parse(sData.top_terms):sData.top_terms)   : [];
+          const posP = tot>0?Math.round(pos/tot*100):0;
+          const negP = tot>0?Math.round(neg/tot*100):0;
+          const neuP = tot>0?Math.round(neu/tot*100):0;
+          const sentColor = avgScore>0.1?C.green:avgScore<-0.1?C.red:C.textM;
+
+          return (
+          <div style={{display:"grid",gridTemplateColumns:"220px 1fr",gap:14}}>
+            {/* Colonne gauche — liste des ministères */}
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:14}}>
+                <div style={{fontWeight:900,fontSize:12,color:C.textS,letterSpacing:.5,marginBottom:10}}>HIÉRARCHIE</div>
+                {["presidence","primature","pole","ministry"].map(lvl=>(
+                  <div key={lvl}>
+                    {ministries.filter(m=>m.level===lvl).map(m=>(
+                      <div key={m.id} onClick={()=>setSelMin(m)} className="hov" style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,marginBottom:4,cursor:"pointer",background:selMinistry?.id===m.id?`${LEVEL_COLOR[lvl]||C.blue}22`:C.bg2,border:`1px solid ${selMinistry?.id===m.id?(LEVEL_COLOR[lvl]||C.blue)+"44":C.border}`,paddingLeft:lvl==="presidence"?10:lvl==="primature"?18:lvl==="pole"?26:34}}>
+                        <span style={{fontSize:14}}>{m.icon||"🏛️"}</span>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:11,fontWeight:selMinistry?.id===m.id?700:400,color:selMinistry?.id===m.id?(LEVEL_COLOR[lvl]||C.blue):C.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{m.short_name}</div>
+                          <div style={{fontSize:9,color:C.textS,textTransform:"uppercase",letterSpacing:.3}}>{lvl}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Colonne droite — dashboard du ministère sélectionné */}
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {!selMinistry&&<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:32,textAlign:"center",color:C.textM,fontSize:13}}>Sélectionnez un ministère</div>}
+              {selMinistry&&(
+                <>
+                  {/* En-tête ministère */}
+                  <div style={{background:C.card,border:`1px solid ${LEVEL_COLOR[selMinistry.level]||C.blue}44`,borderRadius:12,padding:16}}>
+                    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:selMinistry.description?10:0}}>
+                      <div style={{width:46,height:46,borderRadius:12,background:`${LEVEL_COLOR[selMinistry.level]||C.blue}22`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{selMinistry.icon||"🏛️"}</div>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:900,fontSize:14}}>{selMinistry.name}</div>
+                        {selMinistry.minister_name&&<div style={{fontSize:11,color:C.textM,marginTop:2}}>Ministre : {selMinistry.minister_name}</div>}
+                      </div>
+                      <button onClick={triggerMinAggregate} disabled={minAggLoading} className="btn" style={{padding:"6px 14px",fontSize:10.5,background:`${LEVEL_COLOR[selMinistry.level]||C.blue}22`,border:`1px solid ${LEVEL_COLOR[selMinistry.level]||C.blue}44`,color:LEVEL_COLOR[selMinistry.level]||C.blue}}>
+                        {minAggLoading?"…":"⟳ Agréger"}
+                      </button>
+                    </div>
+                    {selMinistry.description&&<div style={{fontSize:10.5,color:C.textM}}>{selMinistry.description}</div>}
+                  </div>
+
+                  {minLoading&&<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:24,textAlign:"center",color:C.textM}}><Spin size={22} color={C.gold}/></div>}
+
+                  {!minLoading&&(
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+
+                      {/* KPIs sentiment */}
+                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🎯 Sentiment population</div>
+                        {tot===0?(
+                          <div style={{textAlign:"center",padding:"18px 0",color:C.textM,fontSize:12}}>Aucune donnée — déclencher une agrégation</div>
+                        ):(
+                          <>
+                            <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:12}}>
+                              <span style={{fontSize:28,fontWeight:900,color:sentColor,fontFamily:"monospace"}}>{avgScore>=0?"+":""}{(avgScore*100).toFixed(0)}</span>
+                              <span style={{fontSize:11,color:C.textM}}>score moyen</span>
+                              <span style={{fontSize:11,fontWeight:700,color:trending>0?C.green:trending<0?C.red:C.textM,marginLeft:"auto"}}>{trending>0?"↑":trending<0?"↓":"→"} {Math.abs(trending*100).toFixed(0)}% vs période préc.</span>
+                            </div>
+                            <div style={{marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:10.5,color:C.textM}}>Positif</span><span style={{fontSize:11,fontWeight:700,color:C.green,fontFamily:"monospace"}}>{pos} ({posP}%)</span></div><MBar pct={posP} color={C.green} h={5}/></div>
+                            <div style={{marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:10.5,color:C.textM}}>Neutre</span><span style={{fontSize:11,fontWeight:700,color:C.textM,fontFamily:"monospace"}}>{neu} ({neuP}%)</span></div><MBar pct={neuP} color={C.textM} h={5}/></div>
+                            <div style={{marginBottom:12}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:10.5,color:C.textM}}>Négatif</span><span style={{fontSize:11,fontWeight:700,color:C.red,fontFamily:"monospace"}}>{neg} ({negP}%)</span></div><MBar pct={negP} color={C.red} h={5}/></div>
+                            <div style={{padding:"8px 12px",background:negP>50?C.redD:posP>40?C.greenD:C.bg3,border:`1px solid ${negP>50?C.red:posP>40?C.green:C.border}44`,borderRadius:8,textAlign:"center",fontSize:11,fontWeight:700,color:negP>50?C.red:posP>40?C.green:C.textM}}>
+                              {negP>50?"🔴 Climat : TENDU":posP>40?"🟢 Climat : FAVORABLE":"🟡 Climat : MITIGÉ"}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Volume & répartition plateformes */}
+                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>📊 Volume & sources</div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+                          {[{l:"Mentions 7j",v:fmtN(minDashboard?.last_7_days?.total_mentions||0),c:C.blue},{l:"Période",v:"DAILY",c:C.textM},{l:"Score moyen",v:avgScore>=0?`+${(avgScore*100).toFixed(0)}`:String((avgScore*100).toFixed(0)),c:sentColor},{l:"Tendance",v:trending>0?`+${(trending*100).toFixed(0)}%`:`${(trending*100).toFixed(0)}%`,c:trending>0?C.green:trending<0?C.red:C.textM}].map(({l,v,c})=>(
+                            <div key={l} style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px"}}>
+                              <div style={{fontSize:9.5,color:C.textS,marginBottom:3}}>{l}</div>
+                              <div style={{fontSize:16,fontWeight:900,color:c,fontFamily:"monospace"}}>{v||"—"}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{fontSize:10.5,color:C.textS,letterSpacing:.3,marginBottom:7}}>PAR PLATEFORME</div>
+                        {Object.keys(platBreak).length===0?(
+                          <div style={{fontSize:11,color:C.textM}}>—</div>
+                        ):(
+                          Object.entries(platBreak).map(([pl,data])=>(
+                            <div key={pl} style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
+                              <span style={{fontSize:10,color:C.textM,width:70,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>
+                              <div style={{flex:1,height:6,borderRadius:3,background:C.bg2,overflow:"hidden"}}>
+                                <div style={{height:"100%",width:`${tot>0?Math.round(data.count/tot*100):0}%`,background:C.blue,borderRadius:3}}/>
+                              </div>
+                              <span style={{fontSize:9.5,fontFamily:"monospace",color:C.textM,width:30,textAlign:"right"}}>{data.count}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      {/* Top termes */}
+                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>🔑 Termes les plus détectés</div>
+                        {topTerms.length===0?<div style={{fontSize:11,color:C.textM,padding:"12px 0"}}>Aucune donnée</div>:topTerms.slice(0,8).map((t,i)=>(
+                          <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",background:i%2===0?C.bg2:"transparent",borderRadius:6,marginBottom:2}}>
+                            <span style={{fontSize:9,color:C.textS,width:14,textAlign:"right",fontWeight:700}}>{i+1}</span>
+                            <span style={{flex:1,fontSize:11.5,color:C.gold}}>{t.term}</span>
+                            <span style={{fontSize:10,color:C.textM,fontFamily:"monospace"}}>{t.count}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Top sujets */}
+                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>🔥 Sujets tendance</div>
+                        {topTopics.length===0?<div style={{fontSize:11,color:C.textM,padding:"12px 0"}}>Aucune donnée</div>:topTopics.slice(0,8).map((t,i)=>(
+                          <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",background:i%2===0?C.bg2:"transparent",borderRadius:6,marginBottom:2}}>
+                            <span style={{fontSize:9,color:C.textS,width:14,textAlign:"right",fontWeight:700}}>{i+1}</span>
+                            <span style={{flex:1,fontSize:11.5}}>{t.topic}</span>
+                            <span style={{fontSize:10,color:C.textM,fontFamily:"monospace"}}>{t.count}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Articles récents liés */}
+                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16,gridColumn:"1/-1"}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>📰 Articles récents liés (30 jours)</div>
+                        {minArticles.length===0?<div style={{fontSize:11,color:C.textM,padding:"10px 0"}}>Aucun article lié</div>:(
+                          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                            {minArticles.slice(0,10).map((a,i)=>(
+                              <a key={i} href={a.url} target="_blank" rel="noreferrer" style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 10px",background:C.bg2,borderRadius:8,textDecoration:"none",border:`1px solid ${C.border}`}} className="hov">
+                                <span style={{fontSize:9,color:C.textS,width:16,textAlign:"right",paddingTop:2,fontWeight:700}}>{i+1}</span>
+                                <div style={{flex:1,minWidth:0}}>
+                                  <div style={{fontSize:11.5,color:C.text,fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.title||"(sans titre)"}</div>
+                                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                                    <span style={{fontSize:9.5,color:C.textM}}>{a.source_name}</span>
+                                    <span style={{fontSize:9.5,color:C.textS}}>·</span>
+                                    <span style={{fontSize:9.5,color:C.textS}}>{a.published_at?new Date(a.published_at).toLocaleDateString("fr-FR"):""}</span>
+                                    <span style={{fontSize:9.5,color:C.textS}}>·</span>
+                                    <span style={{fontSize:9.5,color:a.sentiment==="positif"?C.green:a.sentiment==="negatif"?C.red:C.textM,fontWeight:600}}>{a.sentiment||"neutre"}</span>
+                                    {a.match_score&&<span style={{fontSize:9,color:C.blue,fontFamily:"monospace"}}>score:{(a.match_score*100).toFixed(0)}%</span>}
+                                  </div>
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Gestion des mots-clés */}
+                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:16,gridColumn:"1/-1"}}>
+                        <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🔑 Mots-clés & hashtags du ministère</div>
+                        <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+                          <input className="inp" value={minNewKw.term} onChange={e=>setMinNewKw(p=>({...p,term:e.target.value}))} placeholder="Nouveau terme..." style={{flex:1,minWidth:140}} onKeyDown={e=>e.key==="Enter"&&addMinKw()}/>
+                          <select value={minNewKw.type} onChange={e=>setMinNewKw(p=>({...p,type:e.target.value}))} className="inp" style={{width:120}}>
+                            {["keyword","hashtag","institution","program","person"].map(t=><option key={t} value={t}>{t}</option>)}
+                          </select>
+                          <select value={minNewKw.weight} onChange={e=>setMinNewKw(p=>({...p,weight:Number(e.target.value)}))} className="inp" style={{width:70}}>
+                            {[1,2,3,4,5].map(w=><option key={w} value={w}>W{w}</option>)}
+                          </select>
+                          <button onClick={addMinKw} disabled={minKwLoading} className="btn btn-gold" style={{padding:"8px 16px",fontSize:11}}>＋ Ajouter</button>
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                          {minKws.map(kw=>(
+                            <div key={kw.id} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:C.bg2,borderRadius:20,border:`1px solid ${kw.type==="hashtag"?C.blue+"55":kw.type==="institution"?C.purple+"55":C.border}`,fontSize:11}}>
+                              <span style={{color:kw.type==="hashtag"?C.blue:kw.type==="institution"?C.purple:C.gold}}>{kw.term}</span>
+                              <span style={{fontSize:9,color:C.textS}}>W{kw.weight}</span>
+                              <button onClick={()=>deleteMinKw(kw.id)} style={{background:"none",border:"none",cursor:"pointer",color:C.textS,fontSize:11,padding:"0 0 0 2px",lineHeight:1}} className="hov">✕</button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+          );
+        })()}
 
         {/* ══ RAPPORTS PDF ══ */}
         {tab==="rapports"&&(

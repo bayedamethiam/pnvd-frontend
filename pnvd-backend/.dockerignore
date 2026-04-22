@@ -1,0 +1,13 @@
+__pycache__
+**/__pycache__
+**/*.pyc
+**/*.pyo
+pnvd_venv/
+.env
+*.db
+*.db-shm
+*.db-wal
+.idea/
+.venv/
+fly.toml
+apprunner.yaml

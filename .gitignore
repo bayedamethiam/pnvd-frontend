@@ -1,0 +1,27 @@
+# Dépendances
+node_modules/
+pnvd-backend/pnvd_venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Bases de données
+*.db
+*.sqlite
+*.sqlite3
+
+# Environnement
+.env
+.env.*
+
+# Claude
+.claude/
+pnvd-frontend/.claude/
+
+# Build
+dist/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db

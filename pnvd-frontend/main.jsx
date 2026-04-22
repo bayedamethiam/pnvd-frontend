@@ -1,9 +1,9 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import PNVD from './pnvd-senegal-v5.jsx'
+import App from './pnvd-figma.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <PNVD />
+    <App />
   </React.StrictMode>
 )
