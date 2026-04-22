@@ -36,7 +36,7 @@ const fmt  = n => Number(n).toLocaleString("fr-FR");
 const clamp= (v,a,b) => Math.min(b,Math.max(a,v));
 
 /* ─── API ─── */
-const API = "http://localhost:8100/api/v1";
+const API = "https://pnvd-backend-production.up.railway.app/api/v1";
 
 
 /* ─── NLP ─── */

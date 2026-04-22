@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-*.pyo
-pnvd_venv/
-.env
-*.db
-*.db-shm
-*.db-wal
